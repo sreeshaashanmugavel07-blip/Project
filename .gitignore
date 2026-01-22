@@ -46,3 +46,9 @@ yarn-error.log*
 *.rpm
 *.pkg
 *.app
+
+# Large document files
+*.pdf
+*.doc
+*.docx
+*.html
