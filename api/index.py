@@ -17,16 +17,7 @@ load_dotenv()
 # Initialize FastAPI
 app = FastAPI(title="AI Community Issue Reporting Assistant")
 
-# CORS Configuration
-ALLOWED_ORIGINS_STR = os.getenv("ALLOWED_ORIGINS", "https://vercel.app")
-ALLOWED_ORIGINS = [origin.strip() for origin in ALLOWED_ORIGINS_STR.split(",")]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS is handled by Vercel at the edge level
 
 # Initialize Supabase
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -342,15 +333,12 @@ async def chat(req: ChatRequest):
 
 @app.get("/health")
 def health():
-    import psutil
-    process = psutil.Process()
-    memory_info = process.memory_info()
-
     return {
         "status": "healthy",
         "supabase_connected": supabase is not None,
         "openai_configured": get_llm() is not None,
         "webhook_configured": bool(WEBHOOK_URL),
-        "active_sessions": len(sessions),
-        "memory_usage_mb": round(memory_info.rss / 1024 / 1024, 2)
+        "active_sessions": len(sessions)
     }
+
+# Vercel handles CORS automatically for serverless functions
