@@ -5,6 +5,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 import os
 import requests
+import time
 from typing import Dict, List, Optional
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage
@@ -38,15 +39,20 @@ if SUPABASE_URL and SUPABASE_KEY:
     except Exception as e:
         print(f"Error initializing Supabase: {e}")
 
-# Initialize OpenAI (for LangChain)
+# Initialize OpenAI (for LangChain) - Lazy loading to save memory
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 llm = None
-if OPENAI_API_KEY:
-    try:
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7, api_key=OPENAI_API_KEY)
-        print("OpenAI LLM initialized successfully")
-    except Exception as e:
-        print(f"Error initializing OpenAI: {e}")
+
+def get_llm():
+    """Lazy load LLM to save memory"""
+    global llm
+    if llm is None and OPENAI_API_KEY:
+        try:
+            llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0.7, api_key=OPENAI_API_KEY)  # Use lighter model
+            print("OpenAI LLM initialized successfully")
+        except Exception as e:
+            print(f"Error initializing OpenAI: {e}")
+    return llm
 
 # Webhook URL
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
@@ -65,9 +71,31 @@ class ConversationState:
         self.phone: Optional[str] = None
         self.current_step = "greet"
         self.messages: List[Dict] = []
+        self._last_activity = time.time()
 
 # In-memory session storage (use Redis in production)
 sessions: Dict[str, ConversationState] = {}
+
+def cleanup_old_sessions():
+    """Clean up sessions older than 1 hour to save memory"""
+    import time
+    current_time = time.time()
+    cutoff_time = current_time - 3600  # 1 hour ago
+
+    # Find sessions to remove
+    to_remove = []
+    for session_id, state in sessions.items():
+        # Check if session is old and completed
+        if hasattr(state, '_last_activity') and state._last_activity < cutoff_time and state.current_step == "completed":
+            to_remove.append(session_id)
+
+    # Remove old sessions
+    for session_id in to_remove:
+        del sessions[session_id]
+        print(f"Cleaned up old session: {session_id}")
+
+    if to_remove:
+        print(f"Cleaned up {len(to_remove)} old sessions to save memory")
 
 def process_conversation(state: ConversationState, user_message: str) -> str:
     """Process conversation based on current step - Updated flow: Greet -> Issue Type -> Location -> Description -> Name -> Contact -> Confirm"""
@@ -111,10 +139,11 @@ def process_conversation(state: ConversationState, user_message: str) -> str:
     
     elif state.current_step == "ask_name":
         # Extract name from user message
-        if llm:
+        llm_instance = get_llm()
+        if llm_instance:
             try:
                 prompt = f"Extract the person's name from this message. Return only the name, nothing else, no punctuation: {user_message}"
-                response = llm.invoke([HumanMessage(content=prompt)])
+                response = llm_instance.invoke([HumanMessage(content=prompt)])
                 state.name = response.content.strip().strip('.,!?')
             except Exception as e:
                 print(f"Error extracting name with LLM: {e}")
@@ -230,8 +259,11 @@ def home():
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
     try:
+        # Periodic cleanup to save memory
+        cleanup_old_sessions()
+
         user_message = req.message.strip()
-        
+
         # Get or create session
         session_id = req.session_id or f"session_{datetime.utcnow().timestamp()}"
         is_new_session = session_id not in sessions
@@ -255,8 +287,9 @@ async def chat(req: ChatRequest):
                 session_id=session_id,
                 timestamp=timestamp
             )
-        
+
         state = sessions[session_id]
+        state._last_activity = time.time()  # Update activity timestamp
         
         # Debug: Print current state
         print(f"Session {session_id}: Current step = {state.current_step}, User message = '{user_message}'")
@@ -310,11 +343,17 @@ async def chat(req: ChatRequest):
 
 @app.get("/health")
 def health():
+    import psutil
+    process = psutil.Process()
+    memory_info = process.memory_info()
+
     return {
         "status": "healthy",
         "supabase_connected": supabase is not None,
-        "openai_configured": llm is not None,
-        "webhook_configured": bool(WEBHOOK_URL)
+        "openai_configured": get_llm() is not None,
+        "webhook_configured": bool(WEBHOOK_URL),
+        "active_sessions": len(sessions),
+        "memory_usage_mb": round(memory_info.rss / 1024 / 1024, 2)
     }
 
 if __name__ == "__main__":
